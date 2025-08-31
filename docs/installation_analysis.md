@@ -324,7 +324,7 @@ stateDiagram-v2
 
 ## 📦 Exact Package Installation Sequence by Stage
 
-### **Stage 1: Initial Setup (Lines 2588-2610)**
+### **Stage 1: Initial Setup (Lines 2588-2611)**
 ```python
 # No packages installed yet - only Python stdlib used
 Platform Detection → Memory: 0 packages
@@ -389,15 +389,17 @@ else:
 
 #### **macOS Intel PyTorch (Lines 534-622)**
 ```bash
-# Python 3.13+ (Lines 546-565)
+# Python 3.13+ (Lines 543-575)
 if python >= 3.13:
-    pip install torch==2.3.0 torchvision==0.18.0 torchaudio==2.3.0
+    # First attempt: pip install torch torchvision torchaudio (latest)
+    # Fallback: pip install torch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0
 
-# Python < 3.13 (Lines 566-590)
+# Python < 3.13 (Lines 576-590)
 else:
     pip install torch==1.13.1 torchvision==0.14.1 torchaudio==0.13.1
     
 # Homebrew PyTorch Detected → Skip installation, use system
+# Force-compatible mode: torch==2.3.0 for Python 3.13+ (Line 2708)
 ```
 
 #### **macOS ARM64 PyTorch (Lines 623-668)**
@@ -750,10 +752,10 @@ graph TD
 Installation Failure Points & Recovery:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. ChromaDB Installation Fails (Line 976-983)
+1. ChromaDB Installation Fails (Line 980-983)
    └─➤ Automatic fallback to SQLite-vec
    
-2. PyTorch Installation Fails (Line 1282-1308)
+2. PyTorch Installation Fails (Line 1283-1308)
    └─➤ macOS Intel: Suggest --force-compatible-deps
    └─➤ Others: Continue with ONNX runtime
    
@@ -833,8 +835,9 @@ The installer implements sophisticated decision-making:
 | Windows | CUDA 10.x | 2.5.1/2.4.1 | cu102 index | DirectML: 2.4.1 only |
 | Windows | DirectML | 2.4.1 | cpu index + torch-directml | torch-directml==0.2.5.dev240914 |
 | Windows | CPU | 2.5.1 | cpu index | Latest version |
-| **macOS Intel** | CPU (Python ≥3.13) | 2.3.0 | Default pip | torchvision==0.18.0, torchaudio==2.3.0 |
+| **macOS Intel** | CPU (Python ≥3.13) | Latest/2.1.0 | Default pip | First tries latest, fallback to 2.1.0 |
 | macOS Intel | CPU (Python <3.13) | 1.13.1 | Default pip | torchvision==0.14.1, torchaudio==0.13.1 |
+| macOS Intel | Force-compatible (≥3.13) | 2.3.0 | Default pip | torchvision==0.18.0, torchaudio==2.3.0 |
 | macOS Intel | Homebrew PyTorch | System version | Skip installation | Use existing + ONNX fallback |
 | **macOS ARM64** | MPS | ≥2.0.0 | Default pip | Latest with MPS support |
 | **Linux** | CUDA 12.x | 2.5.1 | cu121 index | |
@@ -846,8 +849,8 @@ The installer implements sophisticated decision-making:
 
 | PyTorch Version Range | Sentence Transformers Version | Platform Notes |
 |----------------------|------------------------------|----------------|
-| ≥2.3.0 (Python 3.13+) | 3.0.0 | Latest compatibility |
-| 2.0.0-2.2.x | 2.2.2 | Stable compatibility |
+| ≥2.1.0 (Python 3.13+) | 3.0.0 | Latest compatibility |
+| 2.0.0-2.0.1 | 2.2.2 | Stable compatibility |
 | 1.13.1 | 2.2.2 | macOS Intel fallback |
 | <1.11.0 | ⚠️ Compatibility warning | May cause runtime issues |
 
