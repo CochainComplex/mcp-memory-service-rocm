@@ -370,6 +370,10 @@ def _calculate_default_hsa_override(gfx_version):
     
     return "10.3.0"  # Conservative default
 
+def get_python_wheel_tag():
+    """Get Python version as wheel tag format (e.g., cp310, cp311)."""
+    return f"cp{sys.version_info.major}{sys.version_info.minor}"
+
 def detect_rocm_gfx_version(gpu_info):
     """Get HSA override value for ROCm GPU architecture (simplified)."""
     gfx_version = gpu_info.get("rocm_gfx_version")
@@ -1006,17 +1010,93 @@ def install_pytorch_linux(gpu_info):
         return install_pytorch_cpu_linux()
 
 def install_pytorch_rocm(gpu_info):
-    """Install PyTorch with ROCm support on Linux."""
+    """Install PyTorch with ROCm support on Linux using dynamic package querying."""
     print_info("Configuring PyTorch installation for AMD ROCm")
     
     rocm_version = gpu_info.get("rocm_version", "")
+    if not rocm_version:
+        print_warning("ROCm version not detected, falling back to CPU installation")
+        return install_pytorch_cpu_linux()
     
-    # Parse ROCm version to determine the appropriate PyTorch index
+    # Get Python version as wheel tag
+    python_tag = get_python_wheel_tag()  # e.g., "cp310"
+    print_info(f"Detected Python version: {python_tag}")
+    print_info(f"Detected ROCm version: {rocm_version}")
+    
+    # Query available packages from ROCm repository
+    packages_to_install = ["torch", "torchvision", "torchaudio"]
+    
+    try:
+        # Import the query module
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'scripts', 'utils'))
+        from query_rocm_packages import query_packages
+        
+        print_info("Querying available ROCm packages...")
+        results = query_packages(python_tag, rocm_version, packages_to_install)
+        
+        # Check if all packages were found
+        found_packages = []
+        missing_packages = []
+        
+        for package_name, info in results.items():
+            if info['found']:
+                found_packages.append((package_name, info))
+                print_info(f"Found {package_name}: {info['version']}")
+            else:
+                missing_packages.append(package_name)
+                print_warning(f"{package_name}: {info['message']}")
+        
+        # Install found packages using direct wheel URLs
+        if found_packages:
+            print_info("Installing PyTorch packages using direct wheel URLs...")
+            for package_name, info in found_packages:
+                try:
+                    cmd = [sys.executable, '-m', 'pip', 'install', info['url']]
+                    print_info(f"Installing {package_name} from: {info['url']}")
+                    subprocess.check_call(cmd, stdout=subprocess.DEVNULL)
+                    print_success(f"Successfully installed {package_name} {info['version']}")
+                except subprocess.SubprocessError as e:
+                    print_error(f"Failed to install {package_name}: {e}")
+                    raise
+            
+            # Verify ROCm support
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    device_name = torch.cuda.get_device_name(0)
+                    print_success(f"PyTorch installed with ROCm support for: {device_name}")
+                    
+                    # Show ROCm device info
+                    print_info(f"ROCm device count: {torch.cuda.device_count()}")
+                    print_info(f"ROCm capability: {torch.cuda.get_device_capability(0)}")
+                    return True
+                else:
+                    print_warning("PyTorch installed but ROCm not accessible")
+                    print_info("This might be due to missing ROCm runtime or driver issues")
+                    return True  # Installation succeeded, runtime issue
+            except Exception as e:
+                print_warning(f"Could not verify ROCm support: {e}")
+                return True  # Installation likely succeeded, import issue
+        else:
+            print_warning("No packages found via direct query, trying fallback method")
+            raise Exception("No packages found")
+    
+    except Exception as e:
+        print_warning(f"Dynamic package query failed: {e}")
+        print_info("Falling back to PyTorch index URL method...")
+        
+        # Fallback to hardcoded index URLs
+        return _install_pytorch_rocm_fallback(gpu_info, rocm_version)
+
+def _install_pytorch_rocm_fallback(gpu_info, rocm_version):
+    """Fallback ROCm installation using hardcoded PyTorch index URLs."""
+    print_info("Using fallback PyTorch index URL installation")
+    
+    # Parse ROCm version for fallback mappings
     rocm_major = None
     rocm_minor = None
     if rocm_version:
         try:
-            # Extract major.minor from version string (e.g., "6.2.4" -> 6, 2)
             version_parts = rocm_version.split('.')
             if len(version_parts) >= 2:
                 rocm_major = int(version_parts[0])
@@ -1024,74 +1104,29 @@ def install_pytorch_rocm(gpu_info):
         except (ValueError, IndexError):
             print_warning(f"Could not parse ROCm version: {rocm_version}")
     
-    # Determine the appropriate PyTorch index URL based on ROCm version
-    # ROCm version matrix (as of February 2025):
-    # - ROCm 6.2.4: PyTorch 2.6.0 (latest stable)
-    # - ROCm 6.0: PyTorch 2.3.0
-    # - ROCm 5.7: PyTorch 2.2.1
-    # - ROCm 6.4: Nightly builds (experimental)
-    
-    index_url = None
-    torch_version = None
-    torchvision_version = None
-    torchaudio_version = None
+    # Determine fallback index URL
+    index_url = "https://download.pytorch.org/whl/rocm6.2.4"  # Default
     
     if rocm_major == 6:
-        if rocm_minor >= 2:
-            # ROCm 6.2 or newer - use latest stable
+        if rocm_minor >= 4:
+            index_url = "https://download.pytorch.org/whl/rocm6.2.4"  # Use 6.2.4 for 6.4+
+        elif rocm_minor >= 2:
             index_url = "https://download.pytorch.org/whl/rocm6.2.4"
-            torch_version = "2.6.0"
-            torchvision_version = "0.21.0"
-            torchaudio_version = "2.6.0"
-            print_info(f"Using PyTorch 2.6.0 for ROCm {rocm_version}")
-        elif rocm_minor == 0 or rocm_minor == 1:
-            # ROCm 6.0 or 6.1
+        else:
             index_url = "https://download.pytorch.org/whl/rocm6.0"
-            torch_version = "2.3.0"
-            torchvision_version = "0.18.0"
-            torchaudio_version = "2.3.0"
-            print_info(f"Using PyTorch 2.3.0 for ROCm {rocm_version}")
-        else:
-            # Unknown 6.x version, try latest
-            index_url = "https://download.pytorch.org/whl/rocm6.2.4"
-            print_warning(f"Unknown ROCm 6.{rocm_minor}, trying latest PyTorch for ROCm 6.2.4")
     elif rocm_major == 5:
-        if rocm_minor >= 7:
-            # ROCm 5.7
-            index_url = "https://download.pytorch.org/whl/rocm5.7"
-            torch_version = "2.2.1"
-            torchvision_version = "0.17.1"
-            torchaudio_version = "2.2.1"
-            print_info(f"Using PyTorch 2.2.1 for ROCm {rocm_version}")
-        else:
-            # Older ROCm 5.x versions
-            print_warning(f"ROCm {rocm_version} is quite old, trying ROCm 5.7 packages")
-            index_url = "https://download.pytorch.org/whl/rocm5.7"
-    else:
-        # Unknown or very old ROCm version
-        print_warning(f"ROCm version {rocm_version or 'unknown'} - trying latest stable")
-        index_url = "https://download.pytorch.org/whl/rocm6.2.4"
+        index_url = "https://download.pytorch.org/whl/rocm5.7"
     
-    # Try installation with specific versions if available
+    print_info(f"Using fallback index URL: {index_url}")
+    
     try:
-        if torch_version:
-            # Install with specific versions
-            cmd = [
-                sys.executable, '-m', 'pip', 'install',
-                f"torch=={torch_version}",
-                f"torchvision=={torchvision_version}",
-                f"torchaudio=={torchaudio_version}",
-                f"--index-url={index_url}"
-            ]
-        else:
-            # Install latest available for the index
-            cmd = [
-                sys.executable, '-m', 'pip', 'install',
-                "torch", "torchvision", "torchaudio",
-                f"--index-url={index_url}"
-            ]
+        cmd = [
+            sys.executable, '-m', 'pip', 'install',
+            "torch", "torchvision", "torchaudio",
+            f"--index-url={index_url}"
+        ]
         
-        print_info(f"Running: {' '.join(cmd)}")
+        print_info(f"Running fallback: {' '.join(cmd)}")
         subprocess.check_call(cmd)
         
         # Verify ROCm support
@@ -1100,22 +1135,16 @@ def install_pytorch_rocm(gpu_info):
             if torch.cuda.is_available():
                 device_name = torch.cuda.get_device_name(0)
                 print_success(f"PyTorch installed with ROCm support for: {device_name}")
-                
-                # Show ROCm device info
-                print_info(f"ROCm device count: {torch.cuda.device_count()}")
-                print_info(f"ROCm capability: {torch.cuda.get_device_capability(0)}")
+                return True
             else:
                 print_warning("PyTorch installed but ROCm not accessible")
-                print_info("This might be due to missing ROCm runtime or driver issues")
+                return True
         except Exception as e:
             print_warning(f"Could not verify ROCm support: {e}")
-        
-        return True
+            return True
         
     except subprocess.SubprocessError as e:
-        print_error(f"Failed to install PyTorch with ROCm: {e}")
-        
-        # Try fallback to CPU-only version
+        print_error(f"Fallback PyTorch installation failed: {e}")
         print_warning("Falling back to CPU-only PyTorch installation")
         return install_pytorch_cpu_linux()
 
