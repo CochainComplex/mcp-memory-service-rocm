@@ -316,15 +316,35 @@ def detect_rocm_gfx_version(gpu_info):
     
     # Map common GFX versions to their override values for better compatibility
     gfx_overrides = {
-        'gfx90a': '9.0.0',   # MI200 series
-        'gfx908': '9.0.8',   # MI100
-        'gfx906': '9.0.6',   # Radeon VII, MI50/MI60
-        'gfx1030': '10.3.0', # RX 6000 series
-        'gfx1031': '10.3.1', # RX 6000 series  
-        'gfx1032': '10.3.2', # RX 6000 series
-        'gfx1100': '11.0.0', # RX 7900 XTX/XT
-        'gfx1101': '11.0.1', # RX 7900 GRE
-        'gfx1102': '11.0.2', # RX 7600
+        # Vega (GCN 5.0/5.1)
+        'gfx900': '9.0.0',   # Vega 10: RX Vega 56/64
+        'gfx902': '9.0.2',   # Raven: Ryzen 2000 series APUs
+        'gfx906': '9.0.6',   # Vega 20: Radeon VII, MI50/MI60
+        'gfx909': '9.0.9',   # Raven 2 APUs
+        'gfx90c': '9.0.12',  # Renoir: Ryzen 4000 series APUs
+        
+        # CDNA
+        'gfx908': '9.0.8',   # CDNA1: MI100
+        'gfx90a': '9.0.10',  # CDNA2: MI200 series
+        'gfx942': '9.4.2',   # CDNA3: MI300 series
+        
+        # RDNA1 (RX 5000 series)
+        'gfx1010': '10.1.0', # Navi 10: RX 5700 XT/5700
+        'gfx1012': '10.1.2', # Navi 14: RX 5500 XT/5300
+        
+        # RDNA2 (RX 6000 series)
+        'gfx1030': '10.3.0', # Navi 21: RX 6900/6800 series
+        'gfx1031': '10.3.1', # Navi 22: RX 6700 series
+        'gfx1032': '10.3.2', # Navi 23: RX 6600 series
+        'gfx1033': '10.3.3', # Steam Deck APU
+        'gfx1034': '10.3.4', # Navi 24: RX 6500/6400
+        'gfx1035': '10.3.5', # Rembrandt: Ryzen 6000 APUs
+        
+        # RDNA3 (RX 7000 series)
+        'gfx1100': '11.0.0', # Navi 31: RX 7900 XTX/XT
+        'gfx1101': '11.0.1', # Navi 32: RX 7800/7700 XT, 7900 GRE
+        'gfx1102': '11.0.2', # Navi 33: RX 7600
+        'gfx1103': '11.0.3', # Phoenix: Ryzen 7000 APUs
     }
     
     if gfx_version in gfx_overrides:
@@ -363,16 +383,35 @@ def detect_rocm_arch(gpu_info):
     # Map GFX versions to PyTorch ROCM_ARCH values
     # These are used when compiling PyTorch extensions
     arch_map = {
-        'gfx900': 'gfx900',  # Vega 10
-        'gfx906': 'gfx906',  # Vega 20 (Radeon VII)
-        'gfx908': 'gfx908',  # MI100
-        'gfx90a': 'gfx90a',  # MI200 series
-        'gfx1030': 'gfx1030', # RX 6000 series (Navi 21)
-        'gfx1031': 'gfx1031', # RX 6000 series
-        'gfx1032': 'gfx1032', # RX 6000 series
-        'gfx1100': 'gfx1100', # RX 7900 XTX/XT (Navi 31)
-        'gfx1101': 'gfx1101', # RX 7900 GRE
-        'gfx1102': 'gfx1102', # RX 7600
+        # Vega (GCN 5.0/5.1)
+        'gfx900': 'gfx900',   # Vega 10: RX Vega 56/64
+        'gfx902': 'gfx902',   # Raven: Ryzen 2000 series APUs
+        'gfx906': 'gfx906',   # Vega 20: Radeon VII, MI50/MI60
+        'gfx909': 'gfx909',   # Raven 2 APUs
+        'gfx90c': 'gfx90c',   # Renoir: Ryzen 4000 series APUs
+        
+        # CDNA
+        'gfx908': 'gfx908',   # CDNA1: MI100
+        'gfx90a': 'gfx90a',   # CDNA2: MI200 series
+        'gfx942': 'gfx942',   # CDNA3: MI300 series
+        
+        # RDNA1 (RX 5000 series)
+        'gfx1010': 'gfx1010', # Navi 10: RX 5700 XT/5700
+        'gfx1012': 'gfx1012', # Navi 14: RX 5500 XT/5300
+        
+        # RDNA2 (RX 6000 series)
+        'gfx1030': 'gfx1030', # Navi 21: RX 6900/6800 series
+        'gfx1031': 'gfx1031', # Navi 22: RX 6700 series
+        'gfx1032': 'gfx1032', # Navi 23: RX 6600 series
+        'gfx1033': 'gfx1033', # Steam Deck APU
+        'gfx1034': 'gfx1034', # Navi 24: RX 6500/6400
+        'gfx1035': 'gfx1035', # Rembrandt: Ryzen 6000 APUs
+        
+        # RDNA3 (RX 7000 series)
+        'gfx1100': 'gfx1100', # Navi 31: RX 7900 XTX/XT
+        'gfx1101': 'gfx1101', # Navi 32: RX 7800/7700 XT, 7900 GRE
+        'gfx1102': 'gfx1102', # Navi 33: RX 7600
+        'gfx1103': 'gfx1103', # Phoenix: Ryzen 7000 APUs
     }
     
     if gfx_version in arch_map:
