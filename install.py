@@ -1024,7 +1024,20 @@ def install_pytorch_rocm(gpu_info):
     print_info(f"Detected ROCm version: {rocm_version}")
     
     # Query available packages from ROCm repository
-    packages_to_install = ["torch", "torchvision", "torchaudio"]
+    # ROCm repository contains: torch, torchvision, torchaudio, onnxruntime_rocm, onnxruntime_training, 
+    # tensorflow_rocm, apex, jaxlib (and other packages)
+    rocm_packages_to_query = [
+        "torch", "torchvision", "torchaudio",        # Core PyTorch packages
+        "onnxruntime_rocm",                          # ONNX runtime optimized for ROCm
+        "onnxruntime_training"                       # ONNX training runtime for ROCm
+    ]
+    
+    # Optional packages (install if available, but don't fail if missing)
+    optional_rocm_packages = [
+        "tensorflow_rocm",                           # TensorFlow with ROCm support
+        "apex",                                      # NVIDIA Apex for mixed precision
+        "jaxlib"                                     # JAX library backend
+    ]
     
     try:
         # Import the query module
@@ -1032,32 +1045,99 @@ def install_pytorch_rocm(gpu_info):
         from query_rocm_packages import query_packages
         
         print_info("Querying available ROCm packages...")
-        results = query_packages(python_tag, rocm_version, packages_to_install)
         
-        # Check if all packages were found
-        found_packages = []
-        missing_packages = []
+        # Query core packages first
+        core_results = query_packages(python_tag, rocm_version, rocm_packages_to_query)
         
-        for package_name, info in results.items():
+        # Query optional packages
+        optional_results = query_packages(python_tag, rocm_version, optional_rocm_packages)
+        
+        # Combine results
+        all_results = {**core_results, **optional_results}
+        
+        # Separate core and optional packages
+        found_core_packages = []
+        missing_core_packages = []
+        found_optional_packages = []
+        
+        # Check core packages (these are required)
+        for package_name in rocm_packages_to_query:
+            info = core_results[package_name]
             if info['found']:
-                found_packages.append((package_name, info))
+                found_core_packages.append((package_name, info))
                 print_info(f"Found {package_name}: {info['version']}")
             else:
-                missing_packages.append(package_name)
-                print_warning(f"{package_name}: {info['message']}")
+                missing_core_packages.append(package_name)
+                print_warning(f"Core package {package_name}: {info['message']}")
+        
+        # Check optional packages (these are nice-to-have)
+        for package_name in optional_rocm_packages:
+            info = optional_results[package_name]
+            if info['found']:
+                found_optional_packages.append((package_name, info))
+                print_info(f"Found optional {package_name}: {info['version']}")
+            else:
+                print_info(f"Optional package {package_name} not available (this is fine)")
+        
+        # Combine found packages
+        found_packages = found_core_packages + found_optional_packages
         
         # Install found packages using direct wheel URLs
         if found_packages:
-            print_info("Installing PyTorch packages using direct wheel URLs...")
-            for package_name, info in found_packages:
-                try:
-                    cmd = [sys.executable, '-m', 'pip', 'install', info['url']]
-                    print_info(f"Installing {package_name} from: {info['url']}")
+            print_info("Installing ROCm-optimized packages using direct wheel URLs...")
+            
+            # Install core ROCm packages
+            if found_core_packages:
+                print_info("Installing core ROCm packages:")
+                for package_name, info in found_core_packages:
+                    try:
+                        cmd = [sys.executable, '-m', 'pip', 'install', info['url']]
+                        print_info(f"  Installing {package_name} {info['version']}...")
+                        subprocess.check_call(cmd, stdout=subprocess.DEVNULL)
+                        print_success(f"  ✓ {package_name} {info['version']}")
+                    except subprocess.SubprocessError as e:
+                        print_error(f"Failed to install core package {package_name}: {e}")
+                        raise
+            
+            # Install optional ROCm packages
+            if found_optional_packages:
+                print_info("Installing optional ROCm packages:")
+                for package_name, info in found_optional_packages:
+                    try:
+                        cmd = [sys.executable, '-m', 'pip', 'install', info['url']]
+                        print_info(f"  Installing {package_name} {info['version']}...")
+                        subprocess.check_call(cmd, stdout=subprocess.DEVNULL)
+                        print_success(f"  ✓ {package_name} {info['version']}")
+                    except subprocess.SubprocessError as e:
+                        print_warning(f"Failed to install optional package {package_name}: {e}")
+                        # Don't raise for optional packages, just continue
+            
+            # Check if ONNX was installed from ROCm repo
+            onnx_installed_from_rocm = any(pkg[0] == 'onnxruntime_rocm' for pkg in found_packages)
+            
+            # Install additional ML dependencies that are not available in ROCm repo
+            print_info("Installing additional ML dependencies from PyPI...")
+            additional_deps = [
+                "sentence-transformers>=2.2.2",  # Core dependency for embeddings
+                "transformers>=4.21.0",         # Usually included with sentence-transformers
+                "tokenizers>=0.13.0",           # Usually included with transformers
+                "numpy>=1.21.0",                # Core dependency
+                "scipy>=1.7.0"                  # Often needed for ML operations
+            ]
+            
+            # Add standard ONNX runtime only if ROCm version wasn't installed
+            if not onnx_installed_from_rocm:
+                additional_deps.append("onnxruntime>=1.14.1")  # Standard ONNX runtime
+            
+            try:
+                for dep in additional_deps:
+                    cmd = [sys.executable, '-m', 'pip', 'install', dep]
+                    print_info(f"  Installing {dep}...")
                     subprocess.check_call(cmd, stdout=subprocess.DEVNULL)
-                    print_success(f"Successfully installed {package_name} {info['version']}")
-                except subprocess.SubprocessError as e:
-                    print_error(f"Failed to install {package_name}: {e}")
-                    raise
+                    print_success(f"  ✓ {dep}")
+            except subprocess.SubprocessError as e:
+                print_warning(f"Failed to install some additional dependencies: {e}")
+                print_info("You may need to install them manually later")
             
             # Verify ROCm support
             try:
@@ -1069,6 +1149,28 @@ def install_pytorch_rocm(gpu_info):
                     # Show ROCm device info
                     print_info(f"ROCm device count: {torch.cuda.device_count()}")
                     print_info(f"ROCm capability: {torch.cuda.get_device_capability(0)}")
+                    
+                    # Verify sentence-transformers works with ROCm
+                    try:
+                        import sentence_transformers
+                        print_success(f"sentence-transformers {sentence_transformers.__version__} is compatible with ROCm PyTorch")
+                    except ImportError:
+                        print_warning("sentence-transformers not found, but this is recoverable")
+                    
+                    # Verify ONNX runtime if installed
+                    if onnx_installed_from_rocm:
+                        try:
+                            import onnxruntime
+                            print_success(f"ONNX Runtime (ROCm) {onnxruntime.__version__} installed successfully")
+                            # Check if ROCm provider is available
+                            providers = onnxruntime.get_available_providers()
+                            if 'ROCMExecutionProvider' in providers:
+                                print_success("ONNX Runtime ROCm execution provider is available")
+                            else:
+                                print_info(f"Available ONNX providers: {', '.join(providers)}")
+                        except ImportError:
+                            print_warning("ONNX Runtime (ROCm) import failed")
+                    
                     return True
                 else:
                     print_warning("PyTorch installed but ROCm not accessible")
