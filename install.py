@@ -294,130 +294,119 @@ def detect_system():
     }
     return _system_info_cache
 
+# Unified ROCm GPU architecture database (Single Source of Truth)
+ROCM_GPU_ARCHITECTURES = {
+    # Vega (GCN 5.0/5.1)
+    'gfx900': {'name': 'Vega 10: RX Vega 56/64', 'hsa_override': '9.0.0', 'pytorch_arch': 'gfx900'},
+    'gfx902': {'name': 'Raven: Ryzen 2000 series APUs', 'hsa_override': '9.0.2', 'pytorch_arch': 'gfx902'},
+    'gfx906': {'name': 'Vega 20: Radeon VII, MI50/MI60', 'hsa_override': '9.0.6', 'pytorch_arch': 'gfx906'},
+    'gfx909': {'name': 'Raven 2 APUs', 'hsa_override': '9.0.9', 'pytorch_arch': 'gfx909'},
+    'gfx90c': {'name': 'Renoir: Ryzen 4000 series APUs', 'hsa_override': '9.0.12', 'pytorch_arch': 'gfx90c'},
+    
+    # CDNA
+    'gfx908': {'name': 'CDNA1: MI100', 'hsa_override': '9.0.8', 'pytorch_arch': 'gfx908'},
+    'gfx90a': {'name': 'CDNA2: MI200 series', 'hsa_override': '9.0.10', 'pytorch_arch': 'gfx90a'},
+    'gfx942': {'name': 'CDNA3: MI300 series', 'hsa_override': '9.4.2', 'pytorch_arch': 'gfx942'},
+    
+    # RDNA1 (RX 5000 series)
+    'gfx1010': {'name': 'Navi 10: RX 5700 XT/5700', 'hsa_override': '10.1.0', 'pytorch_arch': 'gfx1010'},
+    'gfx1012': {'name': 'Navi 14: RX 5500 XT/5300', 'hsa_override': '10.1.2', 'pytorch_arch': 'gfx1012'},
+    
+    # RDNA2 (RX 6000 series)
+    'gfx1030': {'name': 'Navi 21: RX 6900/6800 series', 'hsa_override': '10.3.0', 'pytorch_arch': 'gfx1030'},
+    'gfx1031': {'name': 'Navi 22: RX 6700 series', 'hsa_override': '10.3.1', 'pytorch_arch': 'gfx1031'},
+    'gfx1032': {'name': 'Navi 23: RX 6600 series', 'hsa_override': '10.3.2', 'pytorch_arch': 'gfx1032'},
+    'gfx1033': {'name': 'Steam Deck APU', 'hsa_override': '10.3.3', 'pytorch_arch': 'gfx1033'},
+    'gfx1034': {'name': 'Navi 24: RX 6500/6400', 'hsa_override': '10.3.4', 'pytorch_arch': 'gfx1034'},
+    'gfx1035': {'name': 'Rembrandt: Ryzen 6000 APUs', 'hsa_override': '10.3.5', 'pytorch_arch': 'gfx1035'},
+    
+    # RDNA3 (RX 7000 series)
+    'gfx1100': {'name': 'Navi 31: RX 7900 XTX/XT', 'hsa_override': '11.0.0', 'pytorch_arch': 'gfx1100'},
+    'gfx1101': {'name': 'Navi 32: RX 7800/7700 XT, 7900 GRE', 'hsa_override': '11.0.1', 'pytorch_arch': 'gfx1101'},
+    'gfx1102': {'name': 'Navi 33: RX 7600', 'hsa_override': '11.0.2', 'pytorch_arch': 'gfx1102'},
+    'gfx1103': {'name': 'Phoenix: Ryzen 7000 APUs', 'hsa_override': '11.0.3', 'pytorch_arch': 'gfx1103'},
+}
+
+# Cache for subprocess outputs to avoid repeated calls
+_rocm_command_cache = {}
+
+def _run_command_safe(cmd, cache_key=None):
+    """Run command safely with error handling and optional caching."""
+    if cache_key and cache_key in _rocm_command_cache:
+        return _rocm_command_cache[cache_key]
+    
+    try:
+        output = subprocess.check_output(cmd, stderr=subprocess.STDOUT, universal_newlines=True)
+        if cache_key:
+            _rocm_command_cache[cache_key] = output
+        return output
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+
+def _calculate_default_hsa_override(gfx_version):
+    """Calculate default HSA override value from GFX version."""
+    if not gfx_version or not gfx_version.startswith('gfx'):
+        return "10.3.0"  # Safe default for RDNA2
+    
+    try:
+        # Extract numbers from gfx version (e.g., gfx1100 -> [11, 0, 0])
+        import re
+        match = re.search(r'gfx(\d+)([a-f])?', gfx_version)
+        if match:
+            major = match.group(1)
+            minor = match.group(2) if match.group(2) else '0'
+            
+            # Convert hex minor to decimal if needed
+            if minor.isalpha():
+                minor = str(ord(minor) - ord('a'))
+            
+            # Format as X.Y.Z
+            if len(major) == 3:
+                return f"{major[0]}.{major[1]}.{major[2]}"
+            elif len(major) == 4:
+                return f"{major[0:2]}.{major[2]}.{major[3]}"
+    except Exception:
+        pass
+    
+    return "10.3.0"  # Conservative default
+
 def detect_rocm_gfx_version(gpu_info):
-    """Detect the GFX version for ROCm GPU architecture."""
+    """Get HSA override value for ROCm GPU architecture (simplified)."""
     gfx_version = gpu_info.get("rocm_gfx_version")
     
     if not gfx_version:
-        # Try to detect it if not already found
-        try:
-            rocm_output = subprocess.check_output(['rocminfo'], 
-                                                stderr=subprocess.STDOUT, 
-                                                universal_newlines=True)
+        # Try to detect it if not already found (using cached rocminfo)
+        rocm_output = _run_command_safe(['rocminfo'], 'rocminfo')
+        if rocm_output:
+            import re
             for line in rocm_output.split('\n'):
                 if 'gfx' in line.lower():
-                    import re
                     match = re.search(r'gfx[0-9a-f]+', line.lower())
                     if match:
                         gfx_version = match.group(0)
                         break
-        except (subprocess.SubprocessError, FileNotFoundError):
-            pass
     
-    # Map common GFX versions to their override values for better compatibility
-    gfx_overrides = {
-        # Vega (GCN 5.0/5.1)
-        'gfx900': '9.0.0',   # Vega 10: RX Vega 56/64
-        'gfx902': '9.0.2',   # Raven: Ryzen 2000 series APUs
-        'gfx906': '9.0.6',   # Vega 20: Radeon VII, MI50/MI60
-        'gfx909': '9.0.9',   # Raven 2 APUs
-        'gfx90c': '9.0.12',  # Renoir: Ryzen 4000 series APUs
-        
-        # CDNA
-        'gfx908': '9.0.8',   # CDNA1: MI100
-        'gfx90a': '9.0.10',  # CDNA2: MI200 series
-        'gfx942': '9.4.2',   # CDNA3: MI300 series
-        
-        # RDNA1 (RX 5000 series)
-        'gfx1010': '10.1.0', # Navi 10: RX 5700 XT/5700
-        'gfx1012': '10.1.2', # Navi 14: RX 5500 XT/5300
-        
-        # RDNA2 (RX 6000 series)
-        'gfx1030': '10.3.0', # Navi 21: RX 6900/6800 series
-        'gfx1031': '10.3.1', # Navi 22: RX 6700 series
-        'gfx1032': '10.3.2', # Navi 23: RX 6600 series
-        'gfx1033': '10.3.3', # Steam Deck APU
-        'gfx1034': '10.3.4', # Navi 24: RX 6500/6400
-        'gfx1035': '10.3.5', # Rembrandt: Ryzen 6000 APUs
-        
-        # RDNA3 (RX 7000 series)
-        'gfx1100': '11.0.0', # Navi 31: RX 7900 XTX/XT
-        'gfx1101': '11.0.1', # Navi 32: RX 7800/7700 XT, 7900 GRE
-        'gfx1102': '11.0.2', # Navi 33: RX 7600
-        'gfx1103': '11.0.3', # Phoenix: Ryzen 7000 APUs
-    }
+    # Use unified architecture database
+    arch_info = ROCM_GPU_ARCHITECTURES.get(gfx_version)
+    if arch_info:
+        return arch_info['hsa_override']
     
-    if gfx_version in gfx_overrides:
-        return gfx_overrides[gfx_version]
-    
-    # Try to convert gfx version to override format
-    if gfx_version and gfx_version.startswith('gfx'):
-        try:
-            # Extract numbers from gfx version
-            import re
-            match = re.search(r'gfx(\d+)([a-f])?', gfx_version)
-            if match:
-                major = match.group(1)
-                minor = match.group(2) if match.group(2) else '0'
-                # Convert hex minor to decimal if needed
-                if minor.isalpha():
-                    minor = str(ord(minor) - ord('a'))
-                # Format as X.Y.Z
-                if len(major) == 3:
-                    return f"{major[0]}.{major[1]}.{major[2]}"
-                elif len(major) == 4:
-                    return f"{major[0:2]}.{major[2]}.{major[3]}"
-        except Exception:
-            pass
-    
-    # Default override for common consumer GPUs
-    return "10.3.0"
+    # Fallback calculation for unknown architectures
+    return _calculate_default_hsa_override(gfx_version)
 
 def detect_rocm_arch(gpu_info):
-    """Detect PyTorch ROCm architecture string for compilation."""
+    """Get PyTorch ROCm architecture string for compilation (simplified)."""
     gfx_version = gpu_info.get("rocm_gfx_version")
     
     if not gfx_version:
         return None
     
-    # Map GFX versions to PyTorch ROCM_ARCH values
-    # These are used when compiling PyTorch extensions
-    arch_map = {
-        # Vega (GCN 5.0/5.1)
-        'gfx900': 'gfx900',   # Vega 10: RX Vega 56/64
-        'gfx902': 'gfx902',   # Raven: Ryzen 2000 series APUs
-        'gfx906': 'gfx906',   # Vega 20: Radeon VII, MI50/MI60
-        'gfx909': 'gfx909',   # Raven 2 APUs
-        'gfx90c': 'gfx90c',   # Renoir: Ryzen 4000 series APUs
-        
-        # CDNA
-        'gfx908': 'gfx908',   # CDNA1: MI100
-        'gfx90a': 'gfx90a',   # CDNA2: MI200 series
-        'gfx942': 'gfx942',   # CDNA3: MI300 series
-        
-        # RDNA1 (RX 5000 series)
-        'gfx1010': 'gfx1010', # Navi 10: RX 5700 XT/5700
-        'gfx1012': 'gfx1012', # Navi 14: RX 5500 XT/5300
-        
-        # RDNA2 (RX 6000 series)
-        'gfx1030': 'gfx1030', # Navi 21: RX 6900/6800 series
-        'gfx1031': 'gfx1031', # Navi 22: RX 6700 series
-        'gfx1032': 'gfx1032', # Navi 23: RX 6600 series
-        'gfx1033': 'gfx1033', # Steam Deck APU
-        'gfx1034': 'gfx1034', # Navi 24: RX 6500/6400
-        'gfx1035': 'gfx1035', # Rembrandt: Ryzen 6000 APUs
-        
-        # RDNA3 (RX 7000 series)
-        'gfx1100': 'gfx1100', # Navi 31: RX 7900 XTX/XT
-        'gfx1101': 'gfx1101', # Navi 32: RX 7800/7700 XT, 7900 GRE
-        'gfx1102': 'gfx1102', # Navi 33: RX 7600
-        'gfx1103': 'gfx1103', # Phoenix: Ryzen 7000 APUs
-    }
+    # Use unified architecture database
+    arch_info = ROCM_GPU_ARCHITECTURES.get(gfx_version)
+    if arch_info:
+        return arch_info['pytorch_arch']
     
-    if gfx_version in arch_map:
-        return arch_map[gfx_version]
-    
-    # Return the raw gfx version if not in map
+    # Return the raw gfx version if not in database
     return gfx_version
 
 def detect_gpu():
@@ -490,51 +479,37 @@ def detect_gpu():
                     except (FileNotFoundError, IOError):
                         pass
                 
-                # Method 3: Parse rocminfo output
+                # Method 3: Parse rocminfo output (using cached result)
                 if not rocm_version:
-                    try:
-                        rocm_output = subprocess.check_output(['rocminfo'], 
-                                                            stderr=subprocess.STDOUT, 
-                                                            universal_newlines=True)
+                    rocm_output = _run_command_safe(['rocminfo'], 'rocminfo')
+                    if rocm_output:
                         for line in rocm_output.split('\n'):
                             if 'Version' in line and ':' in line:
                                 rocm_version = line.split(':')[-1].strip()
                                 break
-                    except (subprocess.SubprocessError, FileNotFoundError):
-                        pass
                 
-                # Try to detect GFX architecture
-                try:
-                    rocm_output = subprocess.check_output(['rocminfo'], 
-                                                        stderr=subprocess.STDOUT, 
-                                                        universal_newlines=True)
+                # Try to detect GFX architecture using cached rocminfo
+                rocm_output = _run_command_safe(['rocminfo'], 'rocminfo')
+                if rocm_output:
+                    import re
                     for line in rocm_output.split('\n'):
                         if 'gfx' in line.lower():
-                            # Extract gfx version (e.g., gfx90a, gfx906, gfx1030)
-                            import re
                             match = re.search(r'gfx[0-9a-f]+', line.lower())
                             if match:
                                 rocm_gfx_version = match.group(0)
                                 break
-                except (subprocess.SubprocessError, FileNotFoundError):
-                    pass
                 
                 # Method 4: Try rocm-smi for version
                 if not rocm_version:
-                    try:
-                        smi_output = subprocess.check_output(['rocm-smi', '--version'], 
-                                                           stderr=subprocess.STDOUT, 
-                                                           universal_newlines=True)
+                    smi_output = _run_command_safe(['rocm-smi', '--version'], 'rocm-smi')
+                    if smi_output:
+                        import re
                         for line in smi_output.split('\n'):
                             if 'version' in line.lower():
-                                # Extract version number
-                                import re
                                 match = re.search(r'[0-9]+\.[0-9]+\.[0-9]+', line)
                                 if match:
                                     rocm_version = match.group(0)
                                     break
-                    except (subprocess.SubprocessError, FileNotFoundError):
-                        pass
                 
                 break
     
