@@ -294,6 +294,93 @@ def detect_system():
     }
     return _system_info_cache
 
+def detect_rocm_gfx_version(gpu_info):
+    """Detect the GFX version for ROCm GPU architecture."""
+    gfx_version = gpu_info.get("rocm_gfx_version")
+    
+    if not gfx_version:
+        # Try to detect it if not already found
+        try:
+            rocm_output = subprocess.check_output(['rocminfo'], 
+                                                stderr=subprocess.STDOUT, 
+                                                universal_newlines=True)
+            for line in rocm_output.split('\n'):
+                if 'gfx' in line.lower():
+                    import re
+                    match = re.search(r'gfx[0-9a-f]+', line.lower())
+                    if match:
+                        gfx_version = match.group(0)
+                        break
+        except (subprocess.SubprocessError, FileNotFoundError):
+            pass
+    
+    # Map common GFX versions to their override values for better compatibility
+    gfx_overrides = {
+        'gfx90a': '9.0.0',   # MI200 series
+        'gfx908': '9.0.8',   # MI100
+        'gfx906': '9.0.6',   # Radeon VII, MI50/MI60
+        'gfx1030': '10.3.0', # RX 6000 series
+        'gfx1031': '10.3.1', # RX 6000 series  
+        'gfx1032': '10.3.2', # RX 6000 series
+        'gfx1100': '11.0.0', # RX 7900 XTX/XT
+        'gfx1101': '11.0.1', # RX 7900 GRE
+        'gfx1102': '11.0.2', # RX 7600
+    }
+    
+    if gfx_version in gfx_overrides:
+        return gfx_overrides[gfx_version]
+    
+    # Try to convert gfx version to override format
+    if gfx_version and gfx_version.startswith('gfx'):
+        try:
+            # Extract numbers from gfx version
+            import re
+            match = re.search(r'gfx(\d+)([a-f])?', gfx_version)
+            if match:
+                major = match.group(1)
+                minor = match.group(2) if match.group(2) else '0'
+                # Convert hex minor to decimal if needed
+                if minor.isalpha():
+                    minor = str(ord(minor) - ord('a'))
+                # Format as X.Y.Z
+                if len(major) == 3:
+                    return f"{major[0]}.{major[1]}.{major[2]}"
+                elif len(major) == 4:
+                    return f"{major[0:2]}.{major[2]}.{major[3]}"
+        except Exception:
+            pass
+    
+    # Default override for common consumer GPUs
+    return "10.3.0"
+
+def detect_rocm_arch(gpu_info):
+    """Detect PyTorch ROCm architecture string for compilation."""
+    gfx_version = gpu_info.get("rocm_gfx_version")
+    
+    if not gfx_version:
+        return None
+    
+    # Map GFX versions to PyTorch ROCM_ARCH values
+    # These are used when compiling PyTorch extensions
+    arch_map = {
+        'gfx900': 'gfx900',  # Vega 10
+        'gfx906': 'gfx906',  # Vega 20 (Radeon VII)
+        'gfx908': 'gfx908',  # MI100
+        'gfx90a': 'gfx90a',  # MI200 series
+        'gfx1030': 'gfx1030', # RX 6000 series (Navi 21)
+        'gfx1031': 'gfx1031', # RX 6000 series
+        'gfx1032': 'gfx1032', # RX 6000 series
+        'gfx1100': 'gfx1100', # RX 7900 XTX/XT (Navi 31)
+        'gfx1101': 'gfx1101', # RX 7900 GRE
+        'gfx1102': 'gfx1102', # RX 7600
+    }
+    
+    if gfx_version in arch_map:
+        return arch_map[gfx_version]
+    
+    # Return the raw gfx version if not in map
+    return gfx_version
+
 def detect_gpu():
     """Detect GPU and acceleration capabilities."""
     system_info = detect_system()
@@ -337,26 +424,79 @@ def detect_gpu():
     # Check for ROCm (AMD)
     has_rocm = False
     rocm_version = None
+    rocm_path = None
+    rocm_gfx_version = None
     if system_info["is_linux"]:
-        rocm_paths = ['/opt/rocm', os.environ.get('ROCM_HOME')]
+        rocm_paths = ['/opt/rocm', os.environ.get('ROCM_HOME'), os.environ.get('ROCM_PATH')]
         for path in rocm_paths:
             if path and os.path.exists(path):
                 has_rocm = True
-                try:
-                    # Try to get ROCm version
-                    with open(os.path.join(path, 'bin', '.rocmversion'), 'r') as f:
-                        rocm_version = f.read().strip()
-                except (FileNotFoundError, IOError):
+                rocm_path = path
+                
+                # Try multiple methods to get ROCm version
+                # Method 1: Check .info/version file (most reliable for newer ROCm)
+                version_file = os.path.join(path, '.info', 'version')
+                if os.path.exists(version_file):
+                    try:
+                        with open(version_file, 'r') as f:
+                            rocm_version = f.read().strip()
+                    except (FileNotFoundError, IOError):
+                        pass
+                
+                # Method 2: Check legacy .rocmversion file
+                if not rocm_version:
+                    try:
+                        with open(os.path.join(path, 'bin', '.rocmversion'), 'r') as f:
+                            rocm_version = f.read().strip()
+                    except (FileNotFoundError, IOError):
+                        pass
+                
+                # Method 3: Parse rocminfo output
+                if not rocm_version:
                     try:
                         rocm_output = subprocess.check_output(['rocminfo'], 
                                                             stderr=subprocess.STDOUT, 
                                                             universal_newlines=True)
                         for line in rocm_output.split('\n'):
-                            if 'Version' in line:
+                            if 'Version' in line and ':' in line:
                                 rocm_version = line.split(':')[-1].strip()
                                 break
                     except (subprocess.SubprocessError, FileNotFoundError):
                         pass
+                
+                # Try to detect GFX architecture
+                try:
+                    rocm_output = subprocess.check_output(['rocminfo'], 
+                                                        stderr=subprocess.STDOUT, 
+                                                        universal_newlines=True)
+                    for line in rocm_output.split('\n'):
+                        if 'gfx' in line.lower():
+                            # Extract gfx version (e.g., gfx90a, gfx906, gfx1030)
+                            import re
+                            match = re.search(r'gfx[0-9a-f]+', line.lower())
+                            if match:
+                                rocm_gfx_version = match.group(0)
+                                break
+                except (subprocess.SubprocessError, FileNotFoundError):
+                    pass
+                
+                # Method 4: Try rocm-smi for version
+                if not rocm_version:
+                    try:
+                        smi_output = subprocess.check_output(['rocm-smi', '--version'], 
+                                                           stderr=subprocess.STDOUT, 
+                                                           universal_newlines=True)
+                        for line in smi_output.split('\n'):
+                            if 'version' in line.lower():
+                                # Extract version number
+                                import re
+                                match = re.search(r'[0-9]+\.[0-9]+\.[0-9]+', line)
+                                if match:
+                                    rocm_version = match.group(0)
+                                    break
+                    except (subprocess.SubprocessError, FileNotFoundError):
+                        pass
+                
                 break
     
     # Check for MPS (Apple Silicon)
@@ -397,6 +537,8 @@ def detect_gpu():
         print_info(f"CUDA detected: {cuda_version or 'Unknown version'}")
     if has_rocm:
         print_info(f"ROCm detected: {rocm_version or 'Unknown version'}")
+        if rocm_gfx_version:
+            print_info(f"ROCm GFX Architecture: {rocm_gfx_version}")
     if has_mps:
         print_info("Apple Metal Performance Shaders (MPS) detected")
     if has_directml:
@@ -410,6 +552,8 @@ def detect_gpu():
         "cuda_version": cuda_version,
         "has_rocm": has_rocm,
         "rocm_version": rocm_version,
+        "rocm_path": rocm_path,
+        "rocm_gfx_version": rocm_gfx_version,
         "has_mps": has_mps,
         "has_directml": has_directml
     }
@@ -527,6 +671,8 @@ def install_pytorch_platform_specific(system_info, gpu_info, args=None):
         return install_pytorch_macos_intel()
     elif system_info["is_macos"] and system_info["is_arm"]:
         return install_pytorch_macos_arm64()
+    elif system_info.get("is_linux", False):
+        return install_pytorch_linux(gpu_info)
     else:
         # For other platforms, let the regular installer handle it
         return True
@@ -805,6 +951,231 @@ def install_pytorch_windows(gpu_info):
     except subprocess.SubprocessError as e:
         print_error(f"Failed to install PyTorch for Windows: {e}")
         print_warning("You may need to manually install PyTorch using instructions from https://pytorch.org/get-started/locally/")
+        return False
+
+def install_pytorch_linux(gpu_info):
+    """Install PyTorch on Linux with ROCm/CUDA/CPU support."""
+    print_step("3a", "Installing PyTorch for Linux")
+    
+    # Check if PyTorch is already installed
+    try:
+        import torch
+        existing_version = torch.__version__
+        print_info(f"PyTorch {existing_version} is already installed")
+        
+        # Verify it works with the detected GPU
+        if gpu_info.get("has_rocm"):
+            if torch.cuda.is_available():
+                print_success(f"Existing PyTorch {existing_version} works with ROCm")
+                return True
+            else:
+                print_warning("Existing PyTorch doesn't support ROCm, will reinstall")
+        elif gpu_info.get("has_cuda"):
+            if torch.cuda.is_available():
+                print_success(f"Existing PyTorch {existing_version} works with CUDA")
+                return True
+            else:
+                print_warning("Existing PyTorch doesn't support CUDA, will reinstall")
+        else:
+            # CPU-only is fine
+            print_success(f"Using existing PyTorch {existing_version} for CPU")
+            return True
+    except ImportError:
+        print_info("PyTorch not found, will install appropriate version")
+    
+    # Determine the appropriate PyTorch installation based on GPU
+    if gpu_info.get("has_rocm"):
+        return install_pytorch_rocm(gpu_info)
+    elif gpu_info.get("has_cuda"):
+        return install_pytorch_cuda_linux(gpu_info)
+    else:
+        return install_pytorch_cpu_linux()
+
+def install_pytorch_rocm(gpu_info):
+    """Install PyTorch with ROCm support on Linux."""
+    print_info("Configuring PyTorch installation for AMD ROCm")
+    
+    rocm_version = gpu_info.get("rocm_version", "")
+    
+    # Parse ROCm version to determine the appropriate PyTorch index
+    rocm_major = None
+    rocm_minor = None
+    if rocm_version:
+        try:
+            # Extract major.minor from version string (e.g., "6.2.4" -> 6, 2)
+            version_parts = rocm_version.split('.')
+            if len(version_parts) >= 2:
+                rocm_major = int(version_parts[0])
+                rocm_minor = int(version_parts[1])
+        except (ValueError, IndexError):
+            print_warning(f"Could not parse ROCm version: {rocm_version}")
+    
+    # Determine the appropriate PyTorch index URL based on ROCm version
+    # ROCm version matrix (as of February 2025):
+    # - ROCm 6.2.4: PyTorch 2.6.0 (latest stable)
+    # - ROCm 6.0: PyTorch 2.3.0
+    # - ROCm 5.7: PyTorch 2.2.1
+    # - ROCm 6.4: Nightly builds (experimental)
+    
+    index_url = None
+    torch_version = None
+    torchvision_version = None
+    torchaudio_version = None
+    
+    if rocm_major == 6:
+        if rocm_minor >= 2:
+            # ROCm 6.2 or newer - use latest stable
+            index_url = "https://download.pytorch.org/whl/rocm6.2.4"
+            torch_version = "2.6.0"
+            torchvision_version = "0.21.0"
+            torchaudio_version = "2.6.0"
+            print_info(f"Using PyTorch 2.6.0 for ROCm {rocm_version}")
+        elif rocm_minor == 0 or rocm_minor == 1:
+            # ROCm 6.0 or 6.1
+            index_url = "https://download.pytorch.org/whl/rocm6.0"
+            torch_version = "2.3.0"
+            torchvision_version = "0.18.0"
+            torchaudio_version = "2.3.0"
+            print_info(f"Using PyTorch 2.3.0 for ROCm {rocm_version}")
+        else:
+            # Unknown 6.x version, try latest
+            index_url = "https://download.pytorch.org/whl/rocm6.2.4"
+            print_warning(f"Unknown ROCm 6.{rocm_minor}, trying latest PyTorch for ROCm 6.2.4")
+    elif rocm_major == 5:
+        if rocm_minor >= 7:
+            # ROCm 5.7
+            index_url = "https://download.pytorch.org/whl/rocm5.7"
+            torch_version = "2.2.1"
+            torchvision_version = "0.17.1"
+            torchaudio_version = "2.2.1"
+            print_info(f"Using PyTorch 2.2.1 for ROCm {rocm_version}")
+        else:
+            # Older ROCm 5.x versions
+            print_warning(f"ROCm {rocm_version} is quite old, trying ROCm 5.7 packages")
+            index_url = "https://download.pytorch.org/whl/rocm5.7"
+    else:
+        # Unknown or very old ROCm version
+        print_warning(f"ROCm version {rocm_version or 'unknown'} - trying latest stable")
+        index_url = "https://download.pytorch.org/whl/rocm6.2.4"
+    
+    # Try installation with specific versions if available
+    try:
+        if torch_version:
+            # Install with specific versions
+            cmd = [
+                sys.executable, '-m', 'pip', 'install',
+                f"torch=={torch_version}",
+                f"torchvision=={torchvision_version}",
+                f"torchaudio=={torchaudio_version}",
+                f"--index-url={index_url}"
+            ]
+        else:
+            # Install latest available for the index
+            cmd = [
+                sys.executable, '-m', 'pip', 'install',
+                "torch", "torchvision", "torchaudio",
+                f"--index-url={index_url}"
+            ]
+        
+        print_info(f"Running: {' '.join(cmd)}")
+        subprocess.check_call(cmd)
+        
+        # Verify ROCm support
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device_name = torch.cuda.get_device_name(0)
+                print_success(f"PyTorch installed with ROCm support for: {device_name}")
+                
+                # Show ROCm device info
+                print_info(f"ROCm device count: {torch.cuda.device_count()}")
+                print_info(f"ROCm capability: {torch.cuda.get_device_capability(0)}")
+            else:
+                print_warning("PyTorch installed but ROCm not accessible")
+                print_info("This might be due to missing ROCm runtime or driver issues")
+        except Exception as e:
+            print_warning(f"Could not verify ROCm support: {e}")
+        
+        return True
+        
+    except subprocess.SubprocessError as e:
+        print_error(f"Failed to install PyTorch with ROCm: {e}")
+        
+        # Try fallback to CPU-only version
+        print_warning("Falling back to CPU-only PyTorch installation")
+        return install_pytorch_cpu_linux()
+
+def install_pytorch_cuda_linux(gpu_info):
+    """Install PyTorch with CUDA support on Linux."""
+    print_info("Configuring PyTorch installation for NVIDIA CUDA")
+    
+    cuda_version = gpu_info.get("cuda_version", "")
+    
+    # Determine CUDA index URL
+    cuda_major = None
+    if cuda_version:
+        try:
+            cuda_major = int(cuda_version.split('.')[0])
+        except (ValueError, IndexError):
+            pass
+    
+    # Select appropriate CUDA channel
+    if cuda_major == 12:
+        index_url = "https://download.pytorch.org/whl/cu121"
+        print_info(f"Using CUDA 12.1 channel for CUDA {cuda_version}")
+    elif cuda_major == 11:
+        index_url = "https://download.pytorch.org/whl/cu118"
+        print_info(f"Using CUDA 11.8 channel for CUDA {cuda_version}")
+    else:
+        # Default to CUDA 11.8 as safe choice
+        index_url = "https://download.pytorch.org/whl/cu118"
+        print_info("Using default CUDA 11.8 channel")
+    
+    try:
+        cmd = [
+            sys.executable, '-m', 'pip', 'install',
+            "torch", "torchvision", "torchaudio",
+            f"--index-url={index_url}"
+        ]
+        
+        print_info(f"Running: {' '.join(cmd)}")
+        subprocess.check_call(cmd)
+        
+        # Verify CUDA support
+        try:
+            import torch
+            if torch.cuda.is_available():
+                print_success(f"PyTorch installed with CUDA support: {torch.cuda.get_device_name(0)}")
+            else:
+                print_warning("PyTorch installed but CUDA not accessible")
+        except Exception as e:
+            print_warning(f"Could not verify CUDA support: {e}")
+        
+        return True
+        
+    except subprocess.SubprocessError as e:
+        print_error(f"Failed to install PyTorch with CUDA: {e}")
+        return False
+
+def install_pytorch_cpu_linux():
+    """Install CPU-only PyTorch on Linux."""
+    print_info("Installing CPU-only PyTorch for Linux")
+    
+    try:
+        cmd = [
+            sys.executable, '-m', 'pip', 'install',
+            "torch", "torchvision", "torchaudio",
+            "--index-url=https://download.pytorch.org/whl/cpu"
+        ]
+        
+        print_info(f"Running: {' '.join(cmd)}")
+        subprocess.check_call(cmd)
+        
+        print_success("CPU-only PyTorch installed successfully")
+        return True
+        
+    except subprocess.SubprocessError as e:
+        print_error(f"Failed to install CPU-only PyTorch: {e}")
         return False
 
 def detect_storage_backend_compatibility(system_info, gpu_info):
@@ -1192,6 +1563,32 @@ def install_package(args):
     elif gpu_info.get("has_rocm"):
         print_info("Configuring for ROCm installation")
         env['MCP_MEMORY_USE_ROCM'] = '1'
+        
+        # Set ROCm-specific environment variables for optimal performance
+        if gpu_info.get('rocm_path'):
+            env['ROCM_HOME'] = gpu_info['rocm_path']
+            env['ROCM_PATH'] = gpu_info['rocm_path']
+            print_info(f"ROCm path set to: {gpu_info['rocm_path']}")
+        
+        # Set GFX version override for better compatibility
+        gfx_override = detect_rocm_gfx_version(gpu_info)
+        if gfx_override:
+            env['HSA_OVERRIDE_GFX_VERSION'] = gfx_override
+            print_info(f"HSA GFX override set to: {gfx_override}")
+        
+        # Set PyTorch ROCm architecture for compilation
+        rocm_arch = detect_rocm_arch(gpu_info)
+        if rocm_arch:
+            env['PYTORCH_ROCM_ARCH'] = rocm_arch
+            print_info(f"PyTorch ROCm architecture set to: {rocm_arch}")
+        
+        # Set memory pool configuration for better performance
+        env['HIP_VISIBLE_DEVICES'] = '0'  # Default to first GPU
+        env['ROCM_MEMPOOL_FRAGMENT_SIZE'] = '256MB'
+        env['HSA_FORCE_FINE_GRAIN_PCIE'] = '1'  # Better PCIe performance
+        
+        # Set PyTorch-specific ROCm optimizations
+        env['PYTORCH_HIP_ALLOC_CONF'] = 'max_split_size_mb:512'
     elif gpu_info.get("has_mps"):
         print_info("Configuring for Apple Silicon MPS installation")
         env['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
@@ -1520,10 +1917,25 @@ def verify_installation():
         pytorch_installed = True
         print_info(f"PyTorch is installed: {torch.__version__}")
         
-        # Check for CUDA
+        # Check for CUDA/ROCm (both use cuda interface in PyTorch)
         if torch.cuda.is_available():
-            print_success(f"CUDA is available: {torch.version.cuda}")
-            print_info(f"GPU: {torch.cuda.get_device_name(0)}")
+            # Detect if it's ROCm or CUDA
+            gpu_info = detect_gpu()
+            if gpu_info.get("has_rocm"):
+                print_success("ROCm is available and working with PyTorch")
+                print_info(f"ROCm version: {gpu_info.get('rocm_version', 'Unknown')}")
+                if gpu_info.get('rocm_gfx_version'):
+                    print_info(f"GFX Architecture: {gpu_info['rocm_gfx_version']}")
+                print_info(f"GPU: {torch.cuda.get_device_name(0)}")
+                print_info(f"GPU count: {torch.cuda.device_count()}")
+                
+                # Verify HSA override is set correctly
+                hsa_override = os.environ.get('HSA_OVERRIDE_GFX_VERSION')
+                if hsa_override:
+                    print_info(f"HSA GFX override active: {hsa_override}")
+            else:
+                print_success(f"CUDA is available: {torch.version.cuda}")
+                print_info(f"GPU: {torch.cuda.get_device_name(0)}")
         # Check for MPS (Apple Silicon)
         elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
             print_success("MPS (Metal Performance Shaders) is available")
